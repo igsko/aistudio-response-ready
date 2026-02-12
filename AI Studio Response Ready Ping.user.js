@@ -29,39 +29,30 @@ function log(...args) {
 function setupInnerObserver(target) {
     let hasTriggered = false;
 
+    // target is the [data-turn-role="Model"] div
+    // the footer with buttons is a sibling of this div inside the turn container
+    const turnContainer = target.closest('.chat-turn-container');
+    log("Inner Observer Turn EL: ", turnContainer);
+
     // observer setup
     const innerObserver = new MutationObserver((mutationList, observer) => {
         if(hasTriggered) return; // stop if we found it already
 
-        log(target);
+        const feedbackButton = turnContainer.querySelector('.response-feedback-button');
 
-        const textChunk = target.querySelector('ms-text-chunk');
+        if(feedbackButton) {
+            log("RESPONSE READY!");
+            // play audio
+            audio.play().catch((err) => console.warn("Audio play blocked by browser policy. Interaction required."));
 
-        if(textChunk) {
-            // Find if the text chunk found is indeed the model response
-            // element exists? / is it attatched to the page? / does it have a previous sibling? / does it have a text content?
-            log("textChunk FOUND");
-            log(`textChunk: ${textChunk ? 'true' : 'false'}
-                isConnected: ${textChunk.isConnected ? 'true' : 'false'}
-                textContent not empty: ${textChunk.textContent!== "" ? 'true' : 'false'}
-                textContent matches string: ${textChunk.textContent.includes("Expand to view model thoughts") ? 'true' : 'false'}`)
-
-            // textChunk && textChunk.isConnected && textChunk.previousSibling && textChunk.textContent !== ""
-            if(textChunk && textChunk.isConnected && textChunk.textContent !== "" && !textChunk.textContent.includes("Expand to view model thoughts")) {
-                log("RESPONSE READY!");
-                // play sound
-                audio.play().catch((err) => console.warn("Audio play blocked by browser policy"));
-
-                // cleanup
-                hasTriggered = true;
-                observer.disconnect();
-            }
+            // cleanup
+            hasTriggered = true;
+            observer.disconnect();
         }
-        log(target);
     });
 
     // observer deployment
-    innerObserver.observe(target, { childList: true, subtree: true });
+    innerObserver.observe(turnContainer, { childList: true, subtree: true });
 }
 
 let activeSessionObserver = null;
@@ -91,22 +82,21 @@ function setupMainObserver() {
                 for (const addedNode of mutation.addedNodes){
                     if(addedNode.nodeType === Node.ELEMENT_NODE){
                         //log("is Node.ELEMENT_NODE: ", addedNode);
-                        let modelPrompt = null;
+                        let modelTurn = null;
 
-                        // check if node is the target
+                        // check if added node is the model turn
                         if(addedNode.matches && addedNode.matches('[data-turn-role="Model"]')){
-                            modelPrompt = addedNode;
-                        } else if(addedNode.querySelector) {
-                            modelPrompt = addedNode.querySelector('[data-turn-role="Model"]');
+                            modelTurn = addedNode;
+                        } 
+                        // Check if added node contains the model turn
+                        else if(addedNode.querySelector) {
+                            modelTurn = addedNode.querySelector('[data-turn-role="Model"]');
                         }
 
-                        if(modelPrompt) {
-                            log("model turn found via observer:", modelPrompt);
-                            observer.disconnect();
-                            activeSessionObserver = null;
-                            log("calling setupInnerObserver...");
-                            setupInnerObserver(modelPrompt);
-                            return;
+                        if(modelTurn && !modelTurn.dataset.pingObserved) {
+                            log("New model turn detected:", modelTurn);
+                            modelTurn.dataset.pingObserved = true;
+                            setupInnerObserver(modelTurn);
                         }
                     }
                 }
@@ -126,9 +116,10 @@ function setupMainObserver() {
                     // check immediately if it was added in the same batch
                     const existingModelTurn = foundContent.querySelector('[data-turn-role="Model"]');
                     if(existingModelTurn) {
-                        log("Model turn present already, skipping observer: ", existingModelTurn);
+                        // log("Model turn present already, skipping observer: ", existingModelTurn);
+                        log("Model turn present already, continuing: ", existingModelTurn);
                         setupInnerObserver(existingModelTurn);
-                        return;
+                        // return;
                     }
 
                     activeSessionObserver = new MutationObserver(observerCallback);
@@ -139,24 +130,31 @@ function setupMainObserver() {
         }
     }
 
-    // if we are on a new chat,
-    // set up an observer waiting for the chat session
-    // (when zeroState element is removed)
+
+    // scenario 1: we are on the new chat 
     const zeroState = document.querySelector('ms-zero-state');
     if(zeroState) {
-        log('zeroState: ', zeroState);
+        log('zeroState active - waiting for user to start chat: ', zeroState);
         activeZeroStateObserver = new MutationObserver(zeroStateObserverCallback);
         activeZeroStateObserver.observe(document.body, { childList: true, subtree: true});
     }
+    // scenario 2: we are on an existing chat
     else if (chatSessionContent){
-        log("chatSessionContent already present: ", chatSessionContent);
-        const existingModelTurn = chatSessionContent.querySelector('[data-turn-role="Model"]');
-        if(existingModelTurn) {
-            log("Model turn present already, skipping observer: ", existingModelTurn);
-            setupInnerObserver(existingModelTurn);
-        } else {
-            activeSessionObserver = new MutationObserver(observerCallback);
-            activeSessionObserver.observe(chatSessionContent, { childList: true, subtree: true });
+        log("existing chat session already present: ", chatSessionContent);
+
+        // start the listener for future model turns
+        activeSessionObserver = new MutationObserver(observerCallback);
+        activeSessionObserver.observe(chatSessionContent, { childList: true, subtree: true });
+
+        // get all model turns 
+        // look at just the last one and tag it so we don't double trigger
+        const existingModelTurns = chatSessionContent.querySelectorAll('[data-turn-role="Model"]');
+        if(existingModelTurns.length > 0) {
+            const lastModelTurn = existingModelTurns[existingModelTurns.length - 1];
+            if(!lastModelTurn.dataset.pingObserved) {
+                lastModelTurn.dataset.pingObserved = true;
+                setupInnerObserver(lastModelTurn);
+            }
         }
     }
 }
