@@ -1,19 +1,19 @@
 // ==UserScript==
 // @name         AI Studio Response Ready Ping
 // @namespace    http://tampermonkey.net/
-// @version      0.9.1
+// @version      0.9.2
 // @description  Plays an audible ping, when the model response is ready in Google AI Studio.
 // @author       igsko
 // @match        https://aistudio.google.com/prompts/*
 // @icon         https://www.gstatic.com/aistudio/ai_studio_favicon_2_32x32.png
 // @grant        window.onurlchange
-// @licence      MIT
+// @license      MIT
 // ==/UserScript==
 
 // ---- CONFIGURATION ----
 const DEBUG = true; // enables debug logging
 const AUDIO_URL = "http://codeskulptor-demos.commondatastorage.googleapis.com/pang/pop.mp3"; // url to the audio file
-const VERSION = "0.9.1";
+const VERSION = "0.9.2";
 
 if(DEBUG) console.log(`AI Studio Response Ready Ping v${VERSION}`);
 function log(...args) {
@@ -33,15 +33,21 @@ function setupInnerObserver(target) {
     const innerObserver = new MutationObserver((mutationList, observer) => {
         if(hasTriggered) return; // stop if we found it already
 
+        log(target);
+
         const textChunk = target.querySelector('ms-text-chunk');
-        const thoughtChunk = target.querySelector('ms-thought-chunk');
 
         if(textChunk) {
             // Find if the text chunk found is indeed the model response
             // element exists? / is it attatched to the page? / does it have a previous sibling? / does it have a text content?
+            log("textChunk FOUND");
+            log(`textChunk: ${textChunk ? 'true' : 'false'}
+                isConnected: ${textChunk.isConnected ? 'true' : 'false'}
+                textContent not empty: ${textChunk.textContent!== "" ? 'true' : 'false'}
+                textContent matches string: ${textChunk.textContent.includes("Expand to view model thoughts") ? 'true' : 'false'}`)
 
             // textChunk && textChunk.isConnected && textChunk.previousSibling && textChunk.textContent !== ""
-            if(textChunk && textChunk.isConnected && textChunk.textContent !== "" && !textChunk.contains("Expand to view model thoughts")) {
+            if(textChunk && textChunk.isConnected && textChunk.textContent !== "" && !textChunk.textContent.includes("Expand to view model thoughts")) {
                 log("RESPONSE READY!");
                 // play sound
                 audio.play().catch((err) => console.warn("Audio play blocked by browser policy"));
@@ -76,7 +82,7 @@ function setupMainObserver() {
 
     let chatSessionContent = document.querySelector(".chat-session-content");
     log("Main Observer Session EL: ", chatSessionContent);
-    
+
     // main observer setup:
     // looks for a container with a turn data attribute set to "Model"
     const observerCallback = (mutationList, observer) => {
@@ -84,13 +90,23 @@ function setupMainObserver() {
             if(mutation.type === "childList" && mutation.addedNodes.length > 0){
                 for (const addedNode of mutation.addedNodes){
                     if(addedNode.nodeType === Node.ELEMENT_NODE){
-                        log("is Node.ELEMENT_NODE");
-                        const modelPrompt = addedNode.querySelector('[data-turn-role="Model"]');
+                        //log("is Node.ELEMENT_NODE: ", addedNode);
+                        let modelPrompt = null;
+
+                        // check if node is the target
+                        if(addedNode.matches && addedNode.matches('[data-turn-role="Model"]')){
+                            modelPrompt = addedNode;
+                        } else if(addedNode.querySelector) {
+                            modelPrompt = addedNode.querySelector('[data-turn-role="Model"]');
+                        }
+
                         if(modelPrompt) {
+                            log("model turn found via observer:", modelPrompt);
                             observer.disconnect();
                             activeSessionObserver = null;
                             log("calling setupInnerObserver...");
                             setupInnerObserver(modelPrompt);
+                            return;
                         }
                     }
                 }
@@ -101,23 +117,29 @@ function setupMainObserver() {
     const zeroStateObserverCallback = (mutationList, observer) => {
         for(const mutation of mutationList) {
             if(mutation.type === "childList" && mutation.addedNodes.length > 0){
-                for (const addedNode of mutation.addedNodes){
-                    if(addedNode.nodeType === Node.ELEMENT_NODE){
-                        chatSessionContent = document.querySelector(".chat-session-content");
-                        if(chatSessionContent) {
-                            log("chatSessionContent found: ", chatSessionContent);
-                            observer.disconnect();
-                            activeSessionObserver = new MutationObserver(observerCallback);
-                            activeSessionObserver.observe(chatSessionContent, { childList: true });
-                            return;
-                        }
+                const foundContent = document.querySelector(".chat-session-content");
+
+                if(foundContent){
+                    log("chatSessionContent detected: ", foundContent);
+                    observer.disconnect();
+
+                    // check immediately if it was added in the same batch
+                    const existingModelTurn = foundContent.querySelector('[data-turn-role="Model"]');
+                    if(existingModelTurn) {
+                        log("Model turn present already, skipping observer: ", existingModelTurn);
+                        setupInnerObserver(existingModelTurn);
+                        return;
                     }
+
+                    activeSessionObserver = new MutationObserver(observerCallback);
+                    activeSessionObserver.observe(foundContent, { childList: true, subtree: true });
+                    return;
                 }
             }
         }
     }
 
-    // if we are on a new chat
+    // if we are on a new chat,
     // set up an observer waiting for the chat session
     // (when zeroState element is removed)
     const zeroState = document.querySelector('ms-zero-state');
@@ -126,9 +148,16 @@ function setupMainObserver() {
         activeZeroStateObserver = new MutationObserver(zeroStateObserverCallback);
         activeZeroStateObserver.observe(document.body, { childList: true, subtree: true});
     }
-    else {    
-        activeSessionObserver = new MutationObserver(observerCallback);
-        activeSessionObserver.observe(chatSessionContent, { childList: true });
+    else if (chatSessionContent){
+        log("chatSessionContent already present: ", chatSessionContent);
+        const existingModelTurn = chatSessionContent.querySelector('[data-turn-role="Model"]');
+        if(existingModelTurn) {
+            log("Model turn present already, skipping observer: ", existingModelTurn);
+            setupInnerObserver(existingModelTurn);
+        } else {
+            activeSessionObserver = new MutationObserver(observerCallback);
+            activeSessionObserver.observe(chatSessionContent, { childList: true, subtree: true });
+        }
     }
 }
 
@@ -188,7 +217,7 @@ function setupLoadObserver() {
     }, 50);
 }
 
-const audio = document.createElement("audio"); 
+const audio = document.createElement("audio");
 audio.src = AUDIO_URL;
 
 (function() {
