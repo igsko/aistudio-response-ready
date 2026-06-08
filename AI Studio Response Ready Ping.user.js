@@ -1,232 +1,192 @@
 // ==UserScript==
 // @name         AI Studio Response Ready Ping
 // @namespace    http://tampermonkey.net/
-// @version      0.9.2
+// @version      0.10
 // @description  Plays an audible ping, when the model response is ready in Google AI Studio.
 // @author       igsko
-// @match        https://aistudio.google.com/prompts/*
+// @match        https://aistudio.google.com/*
 // @icon         https://www.gstatic.com/aistudio/ai_studio_favicon_2_32x32.png
 // @grant        window.onurlchange
 // @license      MIT
 // ==/UserScript==
 
-// ---- CONFIGURATION ----
-const DEBUG = true; // enables debug logging
-const AUDIO_URL = "http://codeskulptor-demos.commondatastorage.googleapis.com/pang/pop.mp3"; // url to the audio file
-const VERSION = "0.9.2";
+// === CONFIG ===
+const DEBUG = true; // enable console debug output for development
+const AUDIO_URL = "http://codeskulptor-demos.commondatastorage.googleapis.com/pang/pop.mp3"; // notification sound file
+const VERSION = "0.10";
+// ==============
 
 if(DEBUG) console.log(`AI Studio Response Ready Ping v${VERSION}`);
+// helper to log only when debug mode is enabled
 function log(...args) {
     if(DEBUG) console.log(...args);
 }
 
-/**
- * sets up an inner observer in a container
- * the observer looks for a specific element that fits
- * all the "Model Response is ready" criteria
- * @param {Element} target - The container to set up an observer on
- */
-function setupInnerObserver(target) {
-    let hasTriggered = false;
-
-    // target is the [data-turn-role="Model"] div
-    // the footer with buttons is a sibling of this div inside the turn container
-    const turnContainer = target.closest('.chat-turn-container');
-    log("Inner Observer Turn EL: ", turnContainer);
-
-    // observer setup
-    const innerObserver = new MutationObserver((mutationList, observer) => {
-        if(hasTriggered) return; // stop if we found it already
-
-        const feedbackButton = turnContainer.querySelector('.response-feedback-button');
-
-        if(feedbackButton) {
-            log("RESPONSE READY!");
-            // play audio
-            audio.play().catch((err) => console.warn("Audio play blocked by browser policy. Interaction required."));
-
-            // cleanup
-            hasTriggered = true;
-            observer.disconnect();
-        }
-    });
-
-    // observer deployment
-    innerObserver.observe(turnContainer, { childList: true, subtree: true });
-}
-
-let activeSessionObserver = null;
-let activeZeroStateObserver = null;
-
-/**
- * sets up a main observer on the chat session content container
- * that looks for a container with a turn data attribute set to "Model",
- * which means the AI model responded
- * it then calls setupInnerObserver on it when response found
- */
-function setupMainObserver() {
-
-    if(activeSessionObserver){
-        log("session observer already active");
-        return;
-    }
-
-    let chatSessionContent = document.querySelector(".chat-session-content");
-    log("Main Observer Session EL: ", chatSessionContent);
-
-    // main observer setup:
-    // looks for a container with a turn data attribute set to "Model"
-    const observerCallback = (mutationList, observer) => {
-        for (const mutation of mutationList) {
-            if(mutation.type === "childList" && mutation.addedNodes.length > 0){
-                for (const addedNode of mutation.addedNodes){
-                    if(addedNode.nodeType === Node.ELEMENT_NODE){
-                        //log("is Node.ELEMENT_NODE: ", addedNode);
-                        let modelTurn = null;
-
-                        // check if added node is the model turn
-                        if(addedNode.matches && addedNode.matches('[data-turn-role="Model"]')){
-                            modelTurn = addedNode;
-                        } 
-                        // Check if added node contains the model turn
-                        else if(addedNode.querySelector) {
-                            modelTurn = addedNode.querySelector('[data-turn-role="Model"]');
-                        }
-
-                        if(modelTurn && !modelTurn.dataset.pingObserved) {
-                            log("New model turn detected:", modelTurn);
-                            modelTurn.dataset.pingObserved = true;
-                            setupInnerObserver(modelTurn);
-                        }
-                    }
-                }
-            }
-        }
-    };
-
-    const zeroStateObserverCallback = (mutationList, observer) => {
-        for(const mutation of mutationList) {
-            if(mutation.type === "childList" && mutation.addedNodes.length > 0){
-                const foundContent = document.querySelector(".chat-session-content");
-
-                if(foundContent){
-                    log("chatSessionContent detected: ", foundContent);
-                    observer.disconnect();
-
-                    // check immediately if it was added in the same batch
-                    const existingModelTurn = foundContent.querySelector('[data-turn-role="Model"]');
-                    if(existingModelTurn) {
-                        // log("Model turn present already, skipping observer: ", existingModelTurn);
-                        log("Model turn present already, continuing: ", existingModelTurn);
-                        setupInnerObserver(existingModelTurn);
-                        // return;
-                    }
-
-                    activeSessionObserver = new MutationObserver(observerCallback);
-                    activeSessionObserver.observe(foundContent, { childList: true, subtree: true });
-                    return;
-                }
-            }
-        }
-    }
-
-
-    // scenario 1: we are on the new chat 
-    const zeroState = document.querySelector('ms-zero-state');
-    if(zeroState) {
-        log('zeroState active - waiting for user to start chat: ', zeroState);
-        activeZeroStateObserver = new MutationObserver(zeroStateObserverCallback);
-        activeZeroStateObserver.observe(document.body, { childList: true, subtree: true});
-    }
-    // scenario 2: we are on an existing chat
-    else if (chatSessionContent){
-        log("existing chat session already present: ", chatSessionContent);
-
-        // start the listener for future model turns
-        activeSessionObserver = new MutationObserver(observerCallback);
-        activeSessionObserver.observe(chatSessionContent, { childList: true, subtree: true });
-
-        // get all model turns 
-        // look at just the last one and tag it so we don't double trigger
-        const existingModelTurns = chatSessionContent.querySelectorAll('[data-turn-role="Model"]');
-        if(existingModelTurns.length > 0) {
-            const lastModelTurn = existingModelTurns[existingModelTurns.length - 1];
-            if(!lastModelTurn.dataset.pingObserved) {
-                lastModelTurn.dataset.pingObserved = true;
-                setupInnerObserver(lastModelTurn);
-            }
-        }
-    }
-}
-
-let activeLoadObserver = null
-
-/**
- * sets up a MutationObserver on the document body that looks for a
- * removed element with the local name "prompt-loader",
- * which means the chat session is ready. when found, it
- * triggers the setupMainObserver function and then disconnects the
- * observer.
- */
-function setupLoadObserver() {
-    console.log('setupLoadObserver');
-    if(activeLoadObserver) {
-        log("load observer already active");
-        return;
-    }
-
-    // if the loader is already gone, the chat session is ready.
-    // call setupMainObserver immediately
-    const existingLoader = document.querySelector('prompt-loader');
-    if(!existingLoader) {
-        log('prompt-loader not found -triggering main observer immediately');
-        setupMainObserver();
-        return;
-    }
-
-    activeLoadObserver = new MutationObserver((mutationList, observer) => {
-        for (const mutation of mutationList) {
-            if(mutation.type === "childList" && mutation.removedNodes.length > 0) {
-                for (const removedNode of mutation.removedNodes){
-                    if(removedNode.nodeType === Node.ELEMENT_NODE && removedNode.localName === "prompt-loader"){
-                        // the chat session is ready, trigger the main observer
-                        log("loadObserver triggered");
-                        setupMainObserver();
-                        observer.disconnect();
-                        activeLoadObserver = null;
-                        return;
-                    }
-                }
-            }
-        }
-    });
-    activeLoadObserver.observe(document.body, { childList: true, subtree: true });
-
-    // if prompt-loader is removed in the window between
-    // the initial check and observer activation, re-check shortly after
-    setTimeout(() => {
-        if(!activeLoadObserver) return;
-        if(!document.querySelector('prompt-loader')){
-            log('prompt-loader removed before observer handled it -triggering main observer');
-            setupMainObserver();
-            activeLoadObserver.disconnect();
-            activeLoadObserver = null;
-        }
-    }, 50);
-}
-
-const audio = document.createElement("audio");
-audio.src = AUDIO_URL;
 
 (function() {
     'use strict';
 
-    const pathname = window.location.pathname;
-    if(pathname.includes('new_chat')) log('NEW CHAT');
-    setupLoadObserver();
-    window.addEventListener('urlchange', () => {
-        const pathname = window.location.pathname;
-        if(pathname.includes('new_chat')) log('NEW CHAT');
-        setupLoadObserver();
-    });
+    const TARGET_TAG = 'ms-thought-chunk';
+    const ANIMATION_NAME = 'elementDetected';
+    const MARKER_ATTR = 'data-detected-hook';
+
+    let isInitialLoad = true; // state flag
+    let loaderHasAppeared = false; 
+    let processedElements = new WeakSet(); // cache of handled elements to avoid duplicate work
+
+    // store references to clear/disconnect them during URL transitions
+    let loaderObserver = null;
+    let fallbackTimeoutId = null;
+    let settlingTimeoutId = null;
+
+    function resetLoaderObservation() {
+        log('[Detector] --- URL CHANGED: resetting load state ---');
+
+        // Reset state flags
+        isInitialLoad = true;
+        loaderHasAppeared = false;
+        processedElements = new WeakSet(); // clear past element history for the new URL
+
+        // Clear any active timeouts from previous loads
+        if (fallbackTimeoutId) clearTimeout(fallbackTimeoutId);
+        if (settlingTimeoutId) clearTimeout(settlingTimeoutId);
+
+        // Disconnect previous MutationObserver if it is active
+        if (loaderObserver) {
+            loaderObserver.disconnect();
+        }
+
+        // Set up a fresh loader-monitoring observer for the current transition
+        loaderObserver = new MutationObserver((mutations, obs) => {
+            const loader = document.querySelector('prompt-loader');
+            
+            if (loader) {
+                loaderHasAppeared = true;
+            } else if (loaderHasAppeared && !loader) {
+                // the loader was active but has now disappeared (transition rendering finished)
+                settlingTimeoutId = setTimeout(() => {
+                    isInitialLoad = false;
+                    log('[Detector] --- URL TRANSITION LOAD COMPLETE ---');
+                }, 150);
+                
+                obs.disconnect(); // stop observing to save performance
+            }
+        });
+
+        // start observing the DOM again
+        loaderObserver.observe(document, { childList: true, subtree: true });
+
+        // set up fallback timeout in case the new URL does not require a loader
+        fallbackTimeoutId = setTimeout(() => {
+            if (!loaderHasAppeared && !document.querySelector('prompt-loader')) {
+                isInitialLoad = false;
+                log('[Detector] --- URL TRANSITION LOAD COMPLETE (Fallback) ---');
+                if (loaderObserver) {
+                    loaderObserver.disconnect();
+                }
+            }
+        }, 3000);
+    }
+
+    // Run once for the initial tab load
+    resetLoaderObservation();
+
+    // listen for subsequent dynamic URL changes using Tampermonkey API
+    if (window.onurlchange === null) { // check if the feature is supported
+        window.addEventListener('urlchange', function(info) {
+            resetLoaderObservation();
+        });
+    }
+
+    // ============================
+    // TARGETED DESCENDANT WATCHDOG
+    // ============================
+    /**
+     * Watches a specific element's subtree for the appearance of a descendant
+     * matching a CSS selector and containing targeted text content.
+    */
+    function watchForDescendant(parentElement, selector, targetText, callback) {
+        function checkPresence() {
+            const targetEl = parentElement.querySelector(selector);
+            // verify the element exists and contains target text node content
+            if (targetEl && targetEl.textContent.includes(targetText)) {
+                return true;
+            }
+            return false;
+        }
+
+        console.log('watchForDescendant called');
+
+        // if the descendant is already fully compiled and present, execute immediately
+        if (checkPresence()) {
+            callback();
+            return;
+        }
+
+        // create a local MutationObserver to monitor only this element subtree
+        const observer = new MutationObserver((mutations, obs) => {
+            if (checkPresence()) {
+                callback();
+                obs.disconnect(); // clean once detected
+            }
+        });
+
+        observer.observe(parentElement, {
+            childList: true,       // detects if <mat-panel-title> gets added
+            subtree: true,         // deep search nested children
+            characterData: true    // detects changes if text node updates dynamically
+        });
+
+        // safety timeout to prevent memory leaks if the text never renders or element is detached
+        setTimeout(() => {
+            observer.disconnect();
+        }, 15000);
+    }
+
+    // listen to the event globally
+    function onElementCreated(element) {
+        // ignore null, already processed, or marked elements
+        if (!element || processedElements.has(element) || element.hasAttribute(MARKER_ATTR)) {
+            return;
+        }
+        processedElements.add(element);
+        element.setAttribute(MARKER_ATTR, 'true');
+
+        if (isInitialLoad) {
+            log('[Detector] [PAGE LOAD] Found element:', element);
+        } else {
+            log('[Detector] [DYNAMIC] New element appended later:', element);
+
+            // start watching this specific dynamic element for the "Thoughts" header
+            watchForDescendant(element, 'mat-panel-title', 'Thoughts', () => {
+                log('[Detector] [DYNAMIC] Target text "Thoughts" appeared inside descendant of:', element);
+                console.log('Response ready!');
+                audio.play().catch((err) => console.warn("Audio play blocked by browser policy. Interaction required."));
+            });
+        }
+    }
+
+    // attach animation listener to detect injected target elements
+    document.addEventListener('animationstart', function(event) {
+        if (event.animationName === ANIMATION_NAME) {
+            onElementCreated(event.target);
+        }
+    }, true);
+
+    // inject CSS directly onto the html element
+    const css = `
+        ${TARGET_TAG} { animation: ${ANIMATION_NAME} 0.001s !important; }
+        @keyframes ${ANIMATION_NAME} {
+            from { outline: 1px solid transparent; }
+            to { outline: 1px solid transparent; }
+        }
+    `;
+    const style = document.createElement('style');
+    style.textContent = css;
+    document.documentElement.appendChild(style);
+
+    // Prepare audio element for playback when the response is ready
+    const audio = document.createElement("audio");
+    audio.src = AUDIO_URL;
+
 })();
