@@ -59,15 +59,11 @@ const AUDIO_URL = "https://your-domain.com/notification-sound.mp3";
 
 ## How It Works
 
-The script uses a hierarchical MutationObserver system:
+The script uses a hybrid approach combining a CSS injection hook, targeted element watchdogs, and dynamic URL transition tracking:
 
-1. **Load Observer**: Detects when the chat session has fully loaded by watching for the removal of the `prompt-loader` element
-2. **Main Observer**: Watches for new model response containers (elements with `data-turn-role="Model"`)
-3. **Inner Observer**: Monitors the response container for the actual response content (`ms-text-chunk` or `ms-thought-chunk` elements) and triggers the audio notification
-
-## Version History
-
-- **0.9.1** - Current version
+1. **CSS Animation Hook**: Attaches a custom CSS animation to <ms-thought-chunk> elements (where the model's reasoning is displayed). When this element appears, it triggers an animationstart event, letting the script detect it instantly with minimal performance overhead.
+2. **Subtree Watchdog**: Once a reasoning container is captured, a focused MutationObserver monitors its subtree. When the active "Thinking..." title transitions into the finalized "Thoughts" panel header, indicating that the model is ready, the script triggers the notification sound.
+3. **URL Transition Tracker**: To handle navigation between different chat sessions, the script listens to dynamic URL changes, resets tracking states, monitors the visibility of the prompt-loader wrapper to prepare the hook for the next prompt.
 
 ## License
 
